@@ -1,11 +1,25 @@
 //! # `ext_trait`
-//! `ext_trait` is a procedural macro which provides you with a shortcut to the common pattern of
-//! defining a custom trait to extend some type
+//! `ext_trait` is a procedural macro which provides you with a shortcut to the [extension trait pattern][1]
 //!
+//! [1]: https://github.com/rust-lang/rfcs/blob/master/text/0445-extension-trait-conventions.md
 //! # Examples
+//! - Simple
+//! ```
+//! use ext_trait::ext;
+//!
+//! // IntelliJ complains but it works
+//! // No argument to the macro => A trait name is generated
+//! #[ext]
+//! impl u8 {
+//!     fn foo(self) -> u8 { self + 1 }
+//! }
+//!
+//! assert_eq!(1u8.foo(), 2);
+//! ```
+//!
 //! - One large example
 //! ```
-//! use ext_trait::ext_trait;
+//! use ext_trait::ext;
 //!
 //! macro_rules! foo {
 //!     () => { const BAR: usize = 2; }
@@ -16,7 +30,8 @@
 //! }
 //! impl<T> SameType<T> for T {}
 //!
-//! #[ext_trait(MyVecU8Ext)]
+//! // The argument is the name of the generated trait
+//! #[ext(MyVecU8Ext)]
 //! impl Vec<u8> {
 //!     const FOO: usize = 1;
 //!
@@ -40,10 +55,12 @@
 //!
 //! - Generics
 //! ```
-//! use ext_trait::ext_trait;
+//! use ext_trait::ext;
 //!
-//! #[ext_trait(MyVecExt)]
-//! impl<T> Vec<T> {
+//! #[ext(MyVecExt)]
+//! impl<T> Vec<T>
+//! where T: Eq
+//! {
 //!     pub fn second(&self) -> Option<&T> {
 //!         self.get(1)
 //!     }
@@ -55,11 +72,16 @@
 //! assert_eq!(v.second(), Some(&2));
 //! ```
 //!
+//! # Difference to similar crates
+//! - [`easy_ext`](https://crates.io/crates/easy-ext) only supports methods and constants, not types and macro invokations; also, the implementation differs by a lot
+//!     - to be fair, macro invokations are impossible to fully support with this pattern
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use quote::ToTokens;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hasher;
 use syn::punctuated::Punctuated;
 use syn::{
     parse_macro_input, AngleBracketedGenericArguments, Expr, ExprPath, GenericArgument,
@@ -68,8 +90,15 @@ use syn::{
     TraitItemMacro, TraitItemMethod, TraitItemType, Type, TypePath, VisPublic, Visibility,
 };
 // for some reason IntelliJ doesn't detect the other Token import so this is a quick fix
+use syn::parse::Nothing;
 #[allow(unused_imports)]
 use syn::token::Token;
+
+fn hash(input: &TokenStream) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hasher.write(input.to_string().as_bytes());
+    hasher.finish()
+}
 
 fn ident_to_path(ident: Ident) -> Path {
     let mut segments = Punctuated::new();
@@ -84,12 +113,12 @@ fn ident_to_path(ident: Ident) -> Path {
     }
 }
 
-fn convert_method(m: ImplItemMethod, sp: Span) -> TraitItemMethod {
+fn convert_method(m: ImplItemMethod) -> TraitItemMethod {
     TraitItemMethod {
         attrs: m.attrs,
         sig: m.sig,
         default: None,
-        semi_token: Some(Token![;](sp)),
+        semi_token: Some(Token![;](Span::call_site())),
     }
 }
 
@@ -126,10 +155,10 @@ fn convert_macro(m: ImplItemMacro) -> TraitItemMacro {
     }
 }
 
-fn convert_item(i: ImplItem, sp: Span) -> TraitItem {
+fn convert_item(i: ImplItem) -> TraitItem {
     match i {
         ImplItem::Const(c) => TraitItem::Const(convert_constant(c)),
-        ImplItem::Method(m) => TraitItem::Method(convert_method(m, sp)),
+        ImplItem::Method(m) => TraitItem::Method(convert_method(m)),
         ImplItem::Type(t) => TraitItem::Type(convert_type(t)),
         ImplItem::Macro(m) => TraitItem::Macro(convert_macro(m)),
         ImplItem::Verbatim(s) => TraitItem::Verbatim(s),
@@ -137,19 +166,19 @@ fn convert_item(i: ImplItem, sp: Span) -> TraitItem {
     }
 }
 
-fn convert_impl(i: ItemImpl, sp: Span, vis: Visibility, ident: Ident) -> ItemTrait {
+fn convert_impl(i: ItemImpl, vis: Visibility, ident: Ident) -> ItemTrait {
     ItemTrait {
         attrs: i.attrs,
         vis,
         unsafety: i.unsafety,
         auto_token: None,
-        trait_token: Token![trait](sp),
+        trait_token: Token![trait](Span::call_site()),
         ident,
         generics: i.generics,
         colon_token: None,
         supertraits: Punctuated::new(),
         brace_token: i.brace_token,
-        items: i.items.into_iter().map(|ii| convert_item(ii, sp)).collect(),
+        items: i.items.into_iter().map(convert_item).collect(),
     }
 }
 
@@ -168,7 +197,7 @@ fn convert_generic_params_to_args(p: GenericParam) -> GenericArgument {
     }
 }
 
-fn postprocess_impl(item: &mut ItemImpl, sp: Span, mut path: Path) {
+fn postprocess_impl(item: &mut ItemImpl, mut path: Path) {
     // remove any `pub`
     for ii in &mut item.items {
         if let ImplItem::Method(m) = ii {
@@ -182,7 +211,10 @@ fn postprocess_impl(item: &mut ItemImpl, sp: Span, mut path: Path) {
     if let Some(s) = path.segments.last_mut() {
         s.arguments = PathArguments::AngleBracketed(AngleBracketedGenericArguments {
             colon2_token: None,
-            lt_token: item.generics.lt_token.unwrap_or_else(|| Token![<](sp)),
+            lt_token: item
+                .generics
+                .lt_token
+                .unwrap_or_else(|| Token![<](Span::call_site())),
             args: item
                 .generics
                 .params
@@ -190,34 +222,43 @@ fn postprocess_impl(item: &mut ItemImpl, sp: Span, mut path: Path) {
                 .into_iter()
                 .map(convert_generic_params_to_args)
                 .collect(),
-            gt_token: item.generics.gt_token.unwrap_or_else(|| Token![>](sp)),
+            gt_token: item
+                .generics
+                .gt_token
+                .unwrap_or_else(|| Token![>](Span::call_site())),
         })
     }
 
     // change it to a trait impl
-    item.trait_ = Some((None, path, Token![for](sp)));
+    item.trait_ = Some((None, path, Token![for](Span::call_site())));
 }
 
 #[proc_macro_attribute]
-pub fn ext_trait(args: TokenStream, input: TokenStream) -> TokenStream {
+pub fn ext(args: TokenStream, input: TokenStream) -> TokenStream {
+    let id = hash(&input);
     let mut item = parse_macro_input!(input as ItemImpl);
     if item.trait_.is_some() {
         panic!("Only inherent impls can become an ext trait");
     }
 
-    let name = parse_macro_input!(args as Ident);
-    let span = name.span();
+    let args2 = args.clone();
+    let name = match parse_macro_input!(args as Option<Ident>) {
+        Some(id) => id,
+        None => {
+            let _ = parse_macro_input!(args2 as Nothing);
+            Ident::new(&format!("__ExtTrait{}", id), Span::call_site())
+        }
+    };
 
     let trait_def = convert_impl(
         item.clone(),
-        span,
         Visibility::Public(VisPublic {
-            pub_token: Token![pub](span),
+            pub_token: Token![pub](Span::call_site()),
         }),
         name.clone(),
     );
 
-    postprocess_impl(&mut item, span, ident_to_path(name));
+    postprocess_impl(&mut item, ident_to_path(name));
 
     quote!(#trait_def #item).into()
 }

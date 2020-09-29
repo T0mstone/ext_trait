@@ -1,7 +1,10 @@
-use ext_trait::ext_trait;
+use ext_trait::ext;
 
-#[ext_trait(A)]
-impl<'a, T: Eq> Vec<&'a T> {
+#[ext]
+impl<'a, T: Eq> Vec<&'a T>
+where
+    T: std::fmt::Debug,
+{
     fn foo(&self) -> Option<&'a T> {
         self.first().copied()
     }
