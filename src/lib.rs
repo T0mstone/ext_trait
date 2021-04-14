@@ -4,7 +4,7 @@
 //! [1]: https://github.com/rust-lang/rfcs/blob/master/text/0445-extension-trait-conventions.md
 //! # Examples
 //! Note that IntelliJ Rust really dislikes this macro, i.e. displays errors even if there are none.
-//! This stems from the plugin's linter's limited understanding of
+//! This stems from the plugin's linter's limited understanding of procedural macros.
 //!
 //! - Simple
 //! ```
